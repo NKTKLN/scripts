@@ -34,6 +34,7 @@ GOTIFY_URL="http://gotify.example.com"   # Your Gotify server
 GOTIFY_TOKEN="your-token-here"           # Your Gotify app token
 WG_INTERFACES=()                         # Leave empty () to check ALL interfaces
 STATE_DIR="/var/run/wg-notify"           # Directory to store state files
+ACTIVE_THRESHOLD=300                     # Active handshake time (seconds)
 
 mkdir -p "$STATE_DIR"
 
@@ -66,24 +67,32 @@ fi
 # Iterate over each interface
 for IFACE in $INTERFACES; do
     STATE_FILE="$STATE_DIR/${IFACE}.state"
-    CURRENT=$(mktemp)
+    TMP_CURRENT=$(mktemp)
 
-    wg show "$IFACE" latest-handshakes | awk '{print $1,$2}' > "$CURRENT"
+    now=$(date +%s)
+    wg show "$IFACE" latest-handshakes | while read -r peer ts; do
+        peer_name=$(wg show "$IFACE" allowed-ips | grep "^$peer" | awk '{print $2}')
+        [ -z "$peer_name" ] && peer_name="$peer"
+
+        if [ "$ts" -gt 0 ] && [ $((now - ts)) -lt $ACTIVE_THRESHOLD ]; then
+            echo "$peer online $ts $peer_name" >> "$TMP_CURRENT"
+        else
+            echo "$peer offline $ts $peer_name" >> "$TMP_CURRENT"
+        fi
+    done
 
     if [ -f "$STATE_FILE" ]; then
-        while read -r peer ts; do
-            prev_ts=$(grep "^$peer " "$STATE_FILE" | awk '{print $2}')
-            # Try to extract AllowedIPs (acts as "peer name")
-            peer_name=$(wg show "$IFACE" allowed-ips | grep "^$peer" | awk '{print $2}')
-            [ -z "$peer_name" ] && peer_name="$peer"
-
-            if [ "$ts" -gt 0 ]; then
-                if [ -z "$prev_ts" ] || [ "$ts" -gt "$prev_ts" ]; then
+        while read -r peer state ts peer_name; do
+            prev_state=$(grep "^$peer " "$STATE_FILE" | awk '{print $2}')
+            if [ "$state" != "$prev_state" ]; then
+                if [ "$state" = "online" ]; then
                     send_notification "$peer_name" "connected" "🟢" "$IFACE"
+                else
+                    send_notification "$peer_name" "disconnected" "🔴" "$IFACE"
                 fi
             fi
-        done < "$CURRENT"
+        done < "$TMP_CURRENT"
     fi
 
-    mv "$CURRENT" "$STATE_FILE"
+    mv "$TMP_CURRENT" "$STATE_FILE"
 done
